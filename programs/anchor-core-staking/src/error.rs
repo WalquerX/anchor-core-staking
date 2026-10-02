@@ -18,4 +18,6 @@ pub enum ErrorCode {
     InvalidRewardsBps,
     #[msg("No rewards to claim yet")]
     NothingToClaim,
+    #[msg("Invalid total_staked value")]
+    InvalidTotalStaked,
 }

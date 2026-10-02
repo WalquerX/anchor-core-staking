@@ -129,5 +129,16 @@ pub fn handler(ctx: Context<Stake>) -> Result<()> {
     .init_authority(PluginAuthority::UpdateAuthority)
     .invoke()?;
 
+    // Collection stats: total_staked += 1
+    crate::utils::update_total_staked(
+        &ctx.accounts.mpl_core_program.to_account_info(),
+        &ctx.accounts.collection.to_account_info(),
+        &ctx.accounts.update_authority.to_account_info(),
+        &ctx.accounts.owner.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        signer_seeds,
+        true,
+    )?;
+
     Ok(())
 }

@@ -2,7 +2,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
 import { SystemProgram } from "@solana/web3.js";
-import { MPL_CORE_PROGRAM_ID, mplCore, fetchAsset } from "@metaplex-foundation/mpl-core";
+import { MPL_CORE_PROGRAM_ID, mplCore, fetchAsset, fetchCollection } from "@metaplex-foundation/mpl-core";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
 import { publicKey } from "@metaplex-foundation/umi";
 import { assert } from "chai";
@@ -47,6 +47,11 @@ describe("anchor-core-staking", () => {
       }
       throw err;
     }
+  }
+
+  async function totalStaked(): Promise<string | undefined> {
+    const collection = await fetchCollection(umi, publicKey(collectionKeypair.publicKey.toBase58()));
+    return collection.attributes?.attributeList.find((a) => a.key === "total_staked")?.value;
   }
 
   // Generate a keypair for the collection
@@ -168,6 +173,8 @@ describe("anchor-core-staking", () => {
     assert.equal(get("staked"), "true");
     assert.equal(get("last_claimed_at"), get("staked_at"));
     console.log("Asset attributes", attrs);
+
+    assert.equal(await totalStaked(), "1");
   });
 
   it("Try to unstake an NFT before the freeze period ends", async () => {
@@ -222,6 +229,8 @@ describe("anchor-core-staking", () => {
     const staked = asset.attributes?.attributeList.find((a) => a.key === "staked")?.value;
     assert.equal(staked, "true");
     console.log("Rewards after claim", balance);
+
+    assert.equal(await totalStaked(), "1");
   });
 
   it("Claim again at once fails (no double claim)", async () => {
@@ -254,6 +263,8 @@ describe("anchor-core-staking", () => {
 
     const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
     assert.notExists(asset.freezeDelegate, "FreezeDelegate must be removed");
+
+    assert.equal(await totalStaked(), "0");
   });
 
   it("Claim on an unstaked NFT fails", async () => {
@@ -275,5 +286,7 @@ describe("anchor-core-staking", () => {
 
     const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
     assert.isTrue(asset.freezeDelegate?.frozen, "NFT must be frozen again");
+
+    assert.equal(await totalStaked(), "1");
   });
 });
