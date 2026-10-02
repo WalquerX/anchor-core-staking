@@ -248,5 +248,32 @@ describe("anchor-core-staking", () => {
     .rpc();
     console.log("\nYour transaction signature", tx);
     console.log("User rewards balance", (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount);
+
+    const balance = (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount;
+    assert.equal(balance, 8, "unstake must not pay claimed days again");
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.notExists(asset.freezeDelegate, "FreezeDelegate must be removed");
+  });
+
+  it("Claim on an unstaked NFT fails", async () => {
+    await expectError(program.methods.claimRewards().accountsPartial(rewardAccounts()).rpc(), "AssetNotStaked");
+  });
+
+  it("Stake the same NFT again", async () => {
+    await program.methods.stake()
+    .accountsPartial({
+      owner: provider.wallet.publicKey,
+      updateAuthority,
+      config,
+      asset: nftKeypair.publicKey,
+      collection: collectionKeypair.publicKey,
+      systemProgram: SystemProgram.programId,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+    })
+    .rpc();
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.isTrue(asset.freezeDelegate?.frozen, "NFT must be frozen again");
   });
 });
