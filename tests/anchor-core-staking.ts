@@ -296,4 +296,28 @@ describe("anchor-core-staking", () => {
 
     assert.exists(asset.burnDelegate, "BurnDelegate must be added again");
   });
+
+    it("Burn before freeze period fails", async () => {
+    await expectError(program.methods.burnStakedNft().accountsPartial(rewardAccounts()).rpc(), "FreezePeriodNotElapsed");
+  });
+
+  it("Time travel 8.5 more days", async () => {
+    // First travel was +8 days. +16.5 days is about 8.5 days after the re-stake.
+    await advanceTime({ absoluteTimestamp: Date.now() + 16.5 * MILLISECONDS_PER_DAY });
+  });
+
+  it("Burn a staked NFT: unclaimed rewards + 1000 bonus", async () => {
+    const accounts = rewardAccounts();
+    const before = (await provider.connection.getTokenAccountBalance(accounts.userRewardsAta)).value.uiAmount;
+
+    await program.methods.burnStakedNft().accountsPartial(accounts).rpc();
+
+    const after = (await provider.connection.getTokenAccountBalance(accounts.userRewardsAta)).value.uiAmount;
+    assert.equal(after - before, 8 + 1000, "8 unclaimed days + 1000 bonus");
+    assert.equal(await totalStaked(), "0");
+
+    const info = await provider.connection.getAccountInfo(nftKeypair.publicKey);
+    assert.isTrue(info === null || info.data.length <= 1, "asset must be burned");
+    console.log("Rewards after burn", after);
+  });
 });

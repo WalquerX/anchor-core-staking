@@ -41,4 +41,8 @@ pub mod anchor_core_staking {
     pub fn claim_rewards(ctx: Context<ClaimRewards>) -> Result<()> {
         claim_rewards::handler(ctx)
     }
+
+    pub fn burn_staked_nft(ctx: Context<BurnStakedNft>) -> Result<()> {
+        burn_staked_nft::handler(ctx)
+    }
 }
