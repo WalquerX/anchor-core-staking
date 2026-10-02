@@ -3,7 +3,7 @@ use mpl_core::{
     ID as MPL_CORE_ID,
     accounts::{BaseAssetV1, BaseCollectionV1},
     instructions::{AddPluginV1CpiBuilder, UpdatePluginV1CpiBuilder},
-    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginAuthority, PluginType, FreezeDelegate},
+    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginAuthority, PluginType, FreezeDelegate, BurnDelegate},
     fetch_plugin,
 };
 use crate::state::Config;
@@ -116,6 +116,19 @@ pub fn handler(ctx: Context<Stake>) -> Result<()> {
         .plugin(Plugin::Attributes(Attributes { attribute_list: attributes_list }))
         .invoke_signed(&[signer_seeds])?;
     }
+
+    // Add the BurnDelegate BEFORE the freeze. The update authority PDA becomes
+    // the burn delegate, so burn_staked_nft can burn the asset later.
+    // BurnDelegate is Owner-Managed: the owner signs to add it.
+    AddPluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
+    .asset(&ctx.accounts.asset.to_account_info())
+    .collection(Some(&ctx.accounts.collection.to_account_info()))
+    .payer(&ctx.accounts.owner.to_account_info())
+    .authority(Some(&ctx.accounts.owner.to_account_info()))
+    .system_program(&ctx.accounts.system_program.to_account_info())
+    .plugin(Plugin::BurnDelegate(BurnDelegate {}))
+    .init_authority(PluginAuthority::UpdateAuthority)
+    .invoke()?;
 
     // Freeze the asset with the FreezeDelegate Plugin
     // Note that the FreezeDelegate is a Owner-Managed Plugin, so it needs to be signed by the owner

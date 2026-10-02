@@ -3,7 +3,7 @@ use anchor_spl::{associated_token::AssociatedToken, token_interface::{Mint, Toke
 use mpl_core::{
     ID as MPL_CORE_ID,
     accounts::{BaseAssetV1, BaseCollectionV1},
-    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginType, FreezeDelegate},
+    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginType, FreezeDelegate, BurnDelegate},
     instructions::{RemovePluginV1CpiBuilder, UpdatePluginV1CpiBuilder},
     fetch_plugin,
 };
@@ -166,6 +166,21 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     .system_program(&ctx.accounts.system_program.to_account_info())
     .plugin_type(PluginType::FreezeDelegate)
     .invoke()?;
+    
+    // Remove the BurnDelegate, so an unstaked NFT has no program delegates.
+    if fetch_plugin::<BaseAssetV1, BurnDelegate>(
+        &ctx.accounts.asset.to_account_info(),
+        PluginType::BurnDelegate,
+    ).is_ok() {
+        RemovePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
+        .asset(&ctx.accounts.asset.to_account_info())
+        .collection(Some(&ctx.accounts.collection.to_account_info()))
+        .payer(&ctx.accounts.owner.to_account_info())
+        .authority(Some(&ctx.accounts.owner.to_account_info()))
+        .system_program(&ctx.accounts.system_program.to_account_info())
+        .plugin_type(PluginType::BurnDelegate)
+        .invoke()?;
+    }
 
     // Finally, we want to mint rewards to the user
 

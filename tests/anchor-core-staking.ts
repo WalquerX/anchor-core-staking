@@ -175,6 +175,9 @@ describe("anchor-core-staking", () => {
     console.log("Asset attributes", attrs);
 
     assert.equal(await totalStaked(), "1");
+
+    const stakedAsset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.exists(stakedAsset.burnDelegate, "BurnDelegate must be added");
   });
 
   it("Try to unstake an NFT before the freeze period ends", async () => {
@@ -265,6 +268,8 @@ describe("anchor-core-staking", () => {
     assert.notExists(asset.freezeDelegate, "FreezeDelegate must be removed");
 
     assert.equal(await totalStaked(), "0");
+
+    assert.notExists(asset.burnDelegate, "BurnDelegate must be removed");
   });
 
   it("Claim on an unstaked NFT fails", async () => {
@@ -288,5 +293,7 @@ describe("anchor-core-staking", () => {
     assert.isTrue(asset.freezeDelegate?.frozen, "NFT must be frozen again");
 
     assert.equal(await totalStaked(), "1");
+
+    assert.exists(asset.burnDelegate, "BurnDelegate must be added again");
   });
 });
