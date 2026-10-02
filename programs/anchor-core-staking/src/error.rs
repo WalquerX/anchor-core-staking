@@ -16,4 +16,6 @@ pub enum ErrorCode {
     FreezePeriodNotElapsed,
     #[msg("Invalid rewards bps")]
     InvalidRewardsBps,
+    #[msg("No rewards to claim yet")]
+    NothingToClaim,
 }

@@ -22,6 +22,33 @@ describe("anchor-core-staking", () => {
 
   const umi = createUmi(provider.connection.rpcEndpoint).use(mplCore());
 
+  const rewardAccounts = () => ({
+    owner: provider.wallet.publicKey,
+    updateAuthority,
+    config,
+    rewardsMint,
+    userRewardsAta: getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID),
+    asset: nftKeypair.publicKey,
+    collection: collectionKeypair.publicKey,
+    mplCoreProgram: MPL_CORE_PROGRAM_ID,
+    systemProgram: SystemProgram.programId,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+  });
+
+  async function expectError(p: Promise<any>, code: string) {
+    try {
+      const tx = await p;
+      throw new Error(`Expected ${code}, but tx succeeded: ${tx}`);
+    } catch (err) {
+      if (err instanceof anchor.AnchorError && err.error.errorCode.code === code) {
+        console.log(`\nFailed as expected: ${code}`);
+        return;
+      }
+      throw err;
+    }
+  }
+
   // Generate a keypair for the collection
   const collectionKeypair = anchor.web3.Keypair.generate();
 
@@ -172,11 +199,33 @@ describe("anchor-core-staking", () => {
     }
   });
 
+  it("Claim before one full day fails", async () => {
+    await expectError(program.methods.claimRewards().accountsPartial(rewardAccounts()).rpc(), "NothingToClaim");
+  });
+
   it("Time travel to the future", async () => {
     // Advance time in milliseconds
     const currentTimestamp = Date.now();
     await advanceTime({ absoluteTimestamp: currentTimestamp + TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY });
     console.log("\nTime traveled in days", TIME_TRAVEL_IN_DAYS)
+  });
+
+  it("Claim rewards without unstaking", async () => {
+    const accounts = rewardAccounts();
+    await program.methods.claimRewards().accountsPartial(accounts).rpc();
+
+    const balance = (await provider.connection.getTokenAccountBalance(accounts.userRewardsAta)).value.uiAmount;
+    assert.equal(balance, 8);
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.isTrue(asset.freezeDelegate?.frozen, "NFT must stay frozen");
+    const staked = asset.attributes?.attributeList.find((a) => a.key === "staked")?.value;
+    assert.equal(staked, "true");
+    console.log("Rewards after claim", balance);
+  });
+
+  it("Claim again at once fails (no double claim)", async () => {
+    await expectError(program.methods.claimRewards().accountsPartial(rewardAccounts()).rpc(), "NothingToClaim");
   });
 
   it("Unstake an NFT", async () => {
