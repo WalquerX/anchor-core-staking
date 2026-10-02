@@ -2,7 +2,10 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
 import { SystemProgram } from "@solana/web3.js";
-import { MPL_CORE_PROGRAM_ID } from "@metaplex-foundation/mpl-core";
+import { MPL_CORE_PROGRAM_ID, mplCore, fetchAsset } from "@metaplex-foundation/mpl-core";
+import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
+import { publicKey } from "@metaplex-foundation/umi";
+import { assert } from "chai";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
 const MILLISECONDS_PER_DAY = 86400000;
@@ -16,6 +19,8 @@ describe("anchor-core-staking", () => {
   anchor.setProvider(provider);
 
   const program = anchor.workspace.anchorCoreStaking as Program<AnchorCoreStaking>;
+
+  const umi = createUmi(provider.connection.rpcEndpoint).use(mplCore());
 
   // Generate a keypair for the collection
   const collectionKeypair = anchor.web3.Keypair.generate();
@@ -129,6 +134,13 @@ describe("anchor-core-staking", () => {
     })
     .rpc();
     console.log("\nYour transaction signature", tx);
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    const attrs = asset.attributes?.attributeList ?? [];
+    const get = (k: string) => attrs.find((a) => a.key === k)?.value;
+    assert.equal(get("staked"), "true");
+    assert.equal(get("last_claimed_at"), get("staked_at"));
+    console.log("Asset attributes", attrs);
   });
 
   it("Try to unstake an NFT before the freeze period ends", async () => {

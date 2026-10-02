@@ -61,7 +61,7 @@ pub fn handler(ctx: Context<Stake>) -> Result<()> {
             if attribute.key == "staked" {
                 require!(attribute.value == "false", ErrorCode::AlreadyStaked);
             }
-            else if attribute.key != "staked_at" {
+            else if attribute.key != "staked_at" && attribute.key != "last_claimed_at" {
                 attributes_list.push(attribute.clone());
             }
         }
@@ -72,9 +72,14 @@ pub fn handler(ctx: Context<Stake>) -> Result<()> {
         key: "staked".to_string(),
         value: "true".to_string(),
     });
+    let now = Clock::get()?.unix_timestamp.to_string();
     attributes_list.push(Attribute {
         key: "staked_at".to_string(),
-        value: Clock::get()?.unix_timestamp.to_string(),
+        value: now.clone(),
+    });
+    attributes_list.push(Attribute {
+        key: "last_claimed_at".to_string(),
+        value: now,
     });
 
     // Now that we have the complete list of Attributes we either add the Plugin or Update the existing one
