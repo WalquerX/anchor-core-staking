@@ -1,13 +1,13 @@
 [toolchain]
-package_manager = "yarn"
 anchor_version = "0.31.1"
+package_manager = "yarn"
 
 [features]
 resolution = true
 skip-lint = false
 
 [programs.localnet]
-anchor_core_staking = "FkP21JjeMc9gcq9iBQBHfLocaLsxCYGLg4jgwin6pBwG"
+anchor_core_staking = "5LndETeRwHC59ZN2AwojnfQMMzTSxFxvac5ZywtrWZ1H"
 
 [registry]
 url = "https://api.apr.dev"

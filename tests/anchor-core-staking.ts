@@ -2,7 +2,10 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
 import { SystemProgram } from "@solana/web3.js";
-import { MPL_CORE_PROGRAM_ID } from "@metaplex-foundation/mpl-core";
+import { MPL_CORE_PROGRAM_ID, mplCore, fetchAsset, fetchCollection } from "@metaplex-foundation/mpl-core";
+import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
+import { publicKey } from "@metaplex-foundation/umi";
+import { assert } from "chai";
 import { ASSOCIATED_TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
 const MILLISECONDS_PER_DAY = 86400000;
@@ -16,6 +19,40 @@ describe("anchor-core-staking", () => {
   anchor.setProvider(provider);
 
   const program = anchor.workspace.anchorCoreStaking as Program<AnchorCoreStaking>;
+
+  const umi = createUmi(provider.connection.rpcEndpoint).use(mplCore());
+
+  const rewardAccounts = () => ({
+    owner: provider.wallet.publicKey,
+    updateAuthority,
+    config,
+    rewardsMint,
+    userRewardsAta: getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID),
+    asset: nftKeypair.publicKey,
+    collection: collectionKeypair.publicKey,
+    mplCoreProgram: MPL_CORE_PROGRAM_ID,
+    systemProgram: SystemProgram.programId,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+  });
+
+  async function expectError(p: Promise<any>, code: string) {
+    try {
+      const tx = await p;
+      throw new Error(`Expected ${code}, but tx succeeded: ${tx}`);
+    } catch (err) {
+      if (err instanceof anchor.AnchorError && err.error.errorCode.code === code) {
+        console.log(`\nFailed as expected: ${code}`);
+        return;
+      }
+      throw err;
+    }
+  }
+
+  async function totalStaked(): Promise<string | undefined> {
+    const collection = await fetchCollection(umi, publicKey(collectionKeypair.publicKey.toBase58()));
+    return collection.attributes?.attributeList.find((a) => a.key === "total_staked")?.value;
+  }
 
   // Generate a keypair for the collection
   const collectionKeypair = anchor.web3.Keypair.generate();
@@ -129,6 +166,18 @@ describe("anchor-core-staking", () => {
     })
     .rpc();
     console.log("\nYour transaction signature", tx);
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    const attrs = asset.attributes?.attributeList ?? [];
+    const get = (k: string) => attrs.find((a) => a.key === k)?.value;
+    assert.equal(get("staked"), "true");
+    assert.equal(get("last_claimed_at"), get("staked_at"));
+    console.log("Asset attributes", attrs);
+
+    assert.equal(await totalStaked(), "1");
+
+    const stakedAsset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.exists(stakedAsset.burnDelegate, "BurnDelegate must be added");
   });
 
   it("Try to unstake an NFT before the freeze period ends", async () => {
@@ -160,11 +209,35 @@ describe("anchor-core-staking", () => {
     }
   });
 
+  it("Claim before one full day fails", async () => {
+    await expectError(program.methods.claimRewards().accountsPartial(rewardAccounts()).rpc(), "NothingToClaim");
+  });
+
   it("Time travel to the future", async () => {
     // Advance time in milliseconds
     const currentTimestamp = Date.now();
     await advanceTime({ absoluteTimestamp: currentTimestamp + TIME_TRAVEL_IN_DAYS * MILLISECONDS_PER_DAY });
     console.log("\nTime traveled in days", TIME_TRAVEL_IN_DAYS)
+  });
+
+  it("Claim rewards without unstaking", async () => {
+    const accounts = rewardAccounts();
+    await program.methods.claimRewards().accountsPartial(accounts).rpc();
+
+    const balance = (await provider.connection.getTokenAccountBalance(accounts.userRewardsAta)).value.uiAmount;
+    assert.equal(balance, 8);
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.isTrue(asset.freezeDelegate?.frozen, "NFT must stay frozen");
+    const staked = asset.attributes?.attributeList.find((a) => a.key === "staked")?.value;
+    assert.equal(staked, "true");
+    console.log("Rewards after claim", balance);
+
+    assert.equal(await totalStaked(), "1");
+  });
+
+  it("Claim again at once fails (no double claim)", async () => {
+    await expectError(program.methods.claimRewards().accountsPartial(rewardAccounts()).rpc(), "NothingToClaim");
   });
 
   it("Unstake an NFT", async () => {
@@ -187,5 +260,64 @@ describe("anchor-core-staking", () => {
     .rpc();
     console.log("\nYour transaction signature", tx);
     console.log("User rewards balance", (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount);
+
+    const balance = (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount;
+    assert.equal(balance, 8, "unstake must not pay claimed days again");
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.notExists(asset.freezeDelegate, "FreezeDelegate must be removed");
+
+    assert.equal(await totalStaked(), "0");
+
+    assert.notExists(asset.burnDelegate, "BurnDelegate must be removed");
+  });
+
+  it("Claim on an unstaked NFT fails", async () => {
+    await expectError(program.methods.claimRewards().accountsPartial(rewardAccounts()).rpc(), "AssetNotStaked");
+  });
+
+  it("Stake the same NFT again", async () => {
+    await program.methods.stake()
+    .accountsPartial({
+      owner: provider.wallet.publicKey,
+      updateAuthority,
+      config,
+      asset: nftKeypair.publicKey,
+      collection: collectionKeypair.publicKey,
+      systemProgram: SystemProgram.programId,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+    })
+    .rpc();
+
+    const asset = await fetchAsset(umi, publicKey(nftKeypair.publicKey.toBase58()));
+    assert.isTrue(asset.freezeDelegate?.frozen, "NFT must be frozen again");
+
+    assert.equal(await totalStaked(), "1");
+
+    assert.exists(asset.burnDelegate, "BurnDelegate must be added again");
+  });
+
+    it("Burn before freeze period fails", async () => {
+    await expectError(program.methods.burnStakedNft().accountsPartial(rewardAccounts()).rpc(), "FreezePeriodNotElapsed");
+  });
+
+  it("Time travel 8.5 more days", async () => {
+    // First travel was +8 days. +16.5 days is about 8.5 days after the re-stake.
+    await advanceTime({ absoluteTimestamp: Date.now() + 16.5 * MILLISECONDS_PER_DAY });
+  });
+
+  it("Burn a staked NFT: unclaimed rewards + 1000 bonus", async () => {
+    const accounts = rewardAccounts();
+    const before = (await provider.connection.getTokenAccountBalance(accounts.userRewardsAta)).value.uiAmount;
+
+    await program.methods.burnStakedNft().accountsPartial(accounts).rpc();
+
+    const after = (await provider.connection.getTokenAccountBalance(accounts.userRewardsAta)).value.uiAmount;
+    assert.equal(after - before, 8 + 1000, "8 unclaimed days + 1000 bonus");
+    assert.equal(await totalStaked(), "0");
+
+    const info = await provider.connection.getAccountInfo(nftKeypair.publicKey);
+    assert.isTrue(info === null || info.data.length <= 1, "asset must be burned");
+    console.log("Rewards after burn", after);
   });
 });

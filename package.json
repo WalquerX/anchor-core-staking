@@ -8,7 +8,12 @@
     "@coral-xyz/anchor": "^0.31.1",
     "@metaplex-foundation/mpl-core": "^1.10.0",
     "@metaplex-foundation/umi": "^1.5.1",
-    "@solana/spl-token": "^0.4.14"
+    "@metaplex-foundation/umi-bundle-defaults": "^1.6.0",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.99.0"
+  },
+  "resolutions": {
+    "@solana/web3.js": "1.99.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",

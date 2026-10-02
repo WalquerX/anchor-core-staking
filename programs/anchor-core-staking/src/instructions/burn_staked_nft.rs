@@ -3,17 +3,18 @@ use anchor_spl::{associated_token::AssociatedToken, token_interface::{Mint, Toke
 use mpl_core::{
     ID as MPL_CORE_ID,
     accounts::{BaseAssetV1, BaseCollectionV1},
-    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginType},
-    instructions::UpdatePluginV1CpiBuilder,
+    types::{UpdateAuthority, Attributes, FreezeDelegate, Plugin, PluginType},
+    instructions::{BurnV1CpiBuilder, UpdatePluginV1CpiBuilder},
     fetch_plugin,
 };
+use crate::constants::BURN_BONUS_TOKENS;
 use crate::Config;
 use crate::error::ErrorCode;
 
 const SECONDS_PER_DAY: i64 = 86400;
 
 #[derive(Accounts)]
-pub struct ClaimRewards<'info> {
+pub struct BurnStakedNft<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
     #[account(
@@ -59,7 +60,7 @@ pub struct ClaimRewards<'info> {
     pub mpl_core_program: UncheckedAccount<'info>,
 }
 
-pub fn handler(ctx: Context<ClaimRewards>) -> Result<()> {
+pub fn handler(ctx: Context<BurnStakedNft>) -> Result<()> {
 
     // 1. Read the attributes. The asset must be staked.
     let attributes: Attributes = fetch_plugin::<BaseAssetV1, Attributes>(
@@ -72,7 +73,6 @@ pub fn handler(ctx: Context<ClaimRewards>) -> Result<()> {
     let mut staked = false;
     let mut staked_at: Option<i64> = None;
     let mut last_claimed_at: Option<i64> = None;
-    let mut attributes_list: Vec<Attribute> = Vec::with_capacity(attributes.attribute_list.len());
 
     for attribute in &attributes.attribute_list {
         match attribute.key.as_str() {
@@ -83,53 +83,43 @@ pub fn handler(ctx: Context<ClaimRewards>) -> Result<()> {
             "last_claimed_at" => {
                 last_claimed_at = Some(attribute.value.parse::<i64>().map_err(|_| ErrorCode::InvalidTimestamp)?)
             }
-            // Keep all other attributes unchanged
-            _ => attributes_list.push(attribute.clone()),
+            _ => {}
         }
     }
 
     require!(staked, ErrorCode::AssetNotStaked);
     let staked_at = staked_at.ok_or(ErrorCode::InvalidTimestamp)?;
-    let last_claimed_at = last_claimed_at.ok_or(ErrorCode::InvalidTimestamp)?;
+    let last_claimed_at = last_claimed_at.unwrap_or(staked_at);
 
-    // 2. Count whole days since the last claim
+    // 2. Same freeze period as unstake.
+    //    This stops "stake, then burn at once" for the bonus.
     let now = Clock::get()?.unix_timestamp;
-    let elapsed = now.checked_sub(last_claimed_at).ok_or(ErrorCode::InvalidTimestamp)?;
-    require!(elapsed >= 0, ErrorCode::InvalidTimestamp);
-    let days = elapsed / SECONDS_PER_DAY;
-    require!(days > 0, ErrorCode::NothingToClaim);
+    let days_staked = now
+        .checked_sub(staked_at)
+        .ok_or(ErrorCode::InvalidTimestamp)?
+        / SECONDS_PER_DAY;
+    require!(days_staked >= ctx.accounts.config.freeze_period as i64, ErrorCode::FreezePeriodNotElapsed);
 
-    // 3. Calculate the amount (same formula as unstake)
-    let amount = (days as u64)
+    // 3. Payout = unclaimed rewards + one-time bonus
+    let decimals = ctx.accounts.rewards_mint.decimals;
+    let unclaimed_days = now
+        .checked_sub(last_claimed_at)
+        .ok_or(ErrorCode::InvalidTimestamp)?
+        / SECONDS_PER_DAY;
+    require!(unclaimed_days >= 0, ErrorCode::InvalidTimestamp);
+
+    let unclaimed = (unclaimed_days as u64)
         .checked_mul(ctx.accounts.config.rewards_bps as u64)
         .ok_or(ErrorCode::InvalidRewardsBps)?
-        .checked_mul(10u64.pow(ctx.accounts.rewards_mint.decimals as u32))
+        .checked_mul(10u64.pow(decimals as u32))
         .ok_or(ErrorCode::InvalidRewardsBps)?
         .checked_div(10000u64)
         .ok_or(ErrorCode::InvalidRewardsBps)?;
+    let bonus = BURN_BONUS_TOKENS
+        .checked_mul(10u64.pow(decimals as u32))
+        .ok_or(ErrorCode::InvalidRewardsBps)?;
+    let amount = unclaimed.checked_add(bonus).ok_or(ErrorCode::InvalidRewardsBps)?;
 
-    // 4. Move last_claimed_at forward by exactly the days paid.
-    //    The partial day that is left keeps accruing.
-    //    staked_at does not change, so the freeze period does not restart.
-    let new_last_claimed_at = last_claimed_at
-        .checked_add(days.checked_mul(SECONDS_PER_DAY).ok_or(ErrorCode::InvalidTimestamp)?)
-        .ok_or(ErrorCode::InvalidTimestamp)?;
-
-    attributes_list.push(Attribute {
-        key: "staked".to_string(),
-        value: "true".to_string(),
-    });
-    attributes_list.push(Attribute {
-        key: "staked_at".to_string(),
-        value: staked_at.to_string(),
-    });
-    attributes_list.push(Attribute {
-        key: "last_claimed_at".to_string(),
-        value: new_last_claimed_at.to_string(),
-    });
-
-    // 5. Write the attributes. The update authority PDA signs.
-    //    The FreezeDelegate is not touched, so the NFT stays frozen.
     let collection_key = ctx.accounts.collection.key();
     let signer_seeds = &[
         b"update_authority",
@@ -137,16 +127,27 @@ pub fn handler(ctx: Context<ClaimRewards>) -> Result<()> {
         &[ctx.bumps.update_authority],
     ];
 
+    // 4. Thaw. A frozen FreezeDelegate rejects the burn, and the
+    //    BurnDelegate approval cannot override a rejection.
     UpdatePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
     .asset(&ctx.accounts.asset.to_account_info())
     .collection(Some(&ctx.accounts.collection.to_account_info()))
     .payer(&ctx.accounts.owner.to_account_info())
     .authority(Some(&ctx.accounts.update_authority.to_account_info()))
     .system_program(&ctx.accounts.system_program.to_account_info())
-    .plugin(Plugin::Attributes(Attributes { attribute_list: attributes_list }))
+    .plugin(Plugin::FreezeDelegate(FreezeDelegate { frozen: false }))
     .invoke_signed(&[signer_seeds])?;
 
-    // 6. Mint the rewards. The config PDA is the mint authority.
+    // 5. Burn. The update authority PDA signs as the BurnDelegate.
+    BurnV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
+    .asset(&ctx.accounts.asset.to_account_info())
+    .collection(Some(&ctx.accounts.collection.to_account_info()))
+    .payer(&ctx.accounts.owner.to_account_info())
+    .authority(Some(&ctx.accounts.update_authority.to_account_info()))
+    .system_program(Some(&ctx.accounts.system_program.to_account_info()))
+    .invoke_signed(&[signer_seeds])?;
+
+    // 6. Mint unclaimed rewards + bonus. The config PDA is the mint authority.
     let config_seeds = &[
         b"config",
         collection_key.as_ref(),
@@ -165,7 +166,18 @@ pub fn handler(ctx: Context<ClaimRewards>) -> Result<()> {
             config_signer_seeds,
         ),
         amount,
-        ctx.accounts.rewards_mint.decimals,
+        decimals,
+    )?;
+
+    // 7. Collection stats: total_staked -= 1
+    crate::utils::update_total_staked(
+        &ctx.accounts.mpl_core_program.to_account_info(),
+        &ctx.accounts.collection.to_account_info(),
+        &ctx.accounts.update_authority.to_account_info(),
+        &ctx.accounts.owner.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        signer_seeds,
+        false,
     )?;
 
     Ok(())

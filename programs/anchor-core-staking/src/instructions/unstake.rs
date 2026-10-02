@@ -3,8 +3,8 @@ use anchor_spl::{associated_token::AssociatedToken, token_interface::{Mint, Toke
 use mpl_core::{
     ID as MPL_CORE_ID,
     accounts::{BaseAssetV1, BaseCollectionV1},
-    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginType, FreezeDelegate},
-    instructions::{UpdatePluginV1CpiBuilder},
+    types::{UpdateAuthority, Attribute, Attributes, Plugin, PluginType, FreezeDelegate, BurnDelegate},
+    instructions::{RemovePluginV1CpiBuilder, UpdatePluginV1CpiBuilder},
     fetch_plugin,
 };
 use crate::Config;
@@ -79,7 +79,7 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     // Additional auxiliary variables
     let current_timestamp = Clock::get()?.unix_timestamp;
     let mut staked_timestamp: i64 = 0;
-    let mut staked_time: i64 = 0;
+    let mut last_claimed_at: Option<i64> = None;
 
     for attribute in &attributes.attribute_list {
         if attribute.key == "staked" {
@@ -88,15 +88,29 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
         else if attribute.key == "staked_at" {
             staked_timestamp = staked_timestamp.checked_add(attribute.value.parse::<i64>().map_err(|_| ErrorCode::InvalidTimestamp)?).ok_or(ErrorCode::InvalidTimestamp)?;
             // Calculate the time (in seconds) since the asset was staked
-            staked_time = current_timestamp.checked_sub(staked_timestamp).ok_or(ErrorCode::InvalidTimestamp)?;
+            let mut staked_time = current_timestamp.checked_sub(staked_timestamp).ok_or(ErrorCode::InvalidTimestamp)?;
             // Staked time in days
             staked_time = staked_time.checked_div(SECONDS_PER_DAY).ok_or(ErrorCode::InvalidTimestamp)?;
             require!(staked_time >= ctx.accounts.config.freeze_period as i64, ErrorCode::FreezePeriodNotElapsed);
+        }
+         else if attribute.key == "last_claimed_at" {
+            last_claimed_at = Some(attribute.value.parse::<i64>().map_err(|_| ErrorCode::InvalidTimestamp)?);
         }
         else {
             attributes_list.push(attribute.clone());
         }
     }
+
+    // Rewards count from last_claimed_at, not from staked_at.
+    // Days already paid by claim_rewards are not paid again.
+    // (Assets staked before this change have no last_claimed_at: use staked_at.)
+    let reward_start = last_claimed_at.unwrap_or(staked_timestamp);
+    let reward_days = current_timestamp
+        .checked_sub(reward_start)
+        .ok_or(ErrorCode::InvalidTimestamp)?
+        .checked_div(SECONDS_PER_DAY)
+        .ok_or(ErrorCode::InvalidTimestamp)?;
+    require!(reward_days >= 0, ErrorCode::InvalidTimestamp);
 
     // Prepare signing seeds for the update authority
     let collection_key = ctx.accounts.collection.key();
@@ -115,6 +129,10 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     });
     attributes_list.push(Attribute {
         key: "staked_at".to_string(),
+        value: "0".to_string(),
+    });
+    attributes_list.push(Attribute {
+        key: "last_claimed_at".to_string(),
         value: "0".to_string(),
     });
 
@@ -137,10 +155,37 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     .plugin(Plugin::FreezeDelegate(FreezeDelegate { frozen: false }))
     .invoke_signed(&[signer_seeds])?;
 
+    // Remove the FreezeDelegate. Without this, a second stake of the same NFT
+    // fails, because AddPlugin finds the plugin already there.
+    // FreezeDelegate is Owner-Managed: the owner signs to remove it.
+    RemovePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
+    .asset(&ctx.accounts.asset.to_account_info())
+    .collection(Some(&ctx.accounts.collection.to_account_info()))
+    .payer(&ctx.accounts.owner.to_account_info())
+    .authority(Some(&ctx.accounts.owner.to_account_info()))
+    .system_program(&ctx.accounts.system_program.to_account_info())
+    .plugin_type(PluginType::FreezeDelegate)
+    .invoke()?;
+    
+    // Remove the BurnDelegate, so an unstaked NFT has no program delegates.
+    if fetch_plugin::<BaseAssetV1, BurnDelegate>(
+        &ctx.accounts.asset.to_account_info(),
+        PluginType::BurnDelegate,
+    ).is_ok() {
+        RemovePluginV1CpiBuilder::new(&ctx.accounts.mpl_core_program.to_account_info())
+        .asset(&ctx.accounts.asset.to_account_info())
+        .collection(Some(&ctx.accounts.collection.to_account_info()))
+        .payer(&ctx.accounts.owner.to_account_info())
+        .authority(Some(&ctx.accounts.owner.to_account_info()))
+        .system_program(&ctx.accounts.system_program.to_account_info())
+        .plugin_type(PluginType::BurnDelegate)
+        .invoke()?;
+    }
+
     // Finally, we want to mint rewards to the user
 
     // Calculate the amount
-    let amount =(staked_time as u64)
+    let amount = (reward_days as u64)
         .checked_mul(ctx.accounts.config.rewards_bps as u64)
         .ok_or(ErrorCode::InvalidRewardsBps)?
         .checked_mul(10u64.pow(ctx.accounts.rewards_mint.decimals as u32))
@@ -168,6 +213,17 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
         ),
         amount,
         ctx.accounts.rewards_mint.decimals,
+    )?;
+
+    // Collection stats: total_staked -= 1
+    crate::utils::update_total_staked(
+        &ctx.accounts.mpl_core_program.to_account_info(),
+        &ctx.accounts.collection.to_account_info(),
+        &ctx.accounts.update_authority.to_account_info(),
+        &ctx.accounts.owner.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        signer_seeds,
+        false,
     )?;
 
     Ok(())
