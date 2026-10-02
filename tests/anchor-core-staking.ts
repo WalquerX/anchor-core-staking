@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorCoreStaking } from "../target/types/anchor_core_staking";
-import { SystemProgram } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram, ComputeBudgetProgram } from "@solana/web3.js";
 import { MPL_CORE_PROGRAM_ID, mplCore, fetchAsset, fetchCollection } from "@metaplex-foundation/mpl-core";
 import { createUmi } from "@metaplex-foundation/umi-bundle-defaults";
 import { publicKey } from "@metaplex-foundation/umi";
@@ -236,8 +236,16 @@ describe("anchor-core-staking", () => {
     assert.equal(await totalStaked(), "1");
   });
 
-  it("Claim again at once fails (no double claim)", async () => {
-    await expectError(program.methods.claimRewards().accountsPartial(rewardAccounts()).rpc(), "NothingToClaim");
+    it("Claim again at once fails (no double claim)", async () => {
+    // Extra instruction: makes this tx different from the first claim,
+    // so the validator does not reject it as a duplicate.
+    await expectError(
+      program.methods.claimRewards()
+        .accountsPartial(rewardAccounts())
+        .preInstructions([ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 })])
+        .rpc(),
+      "NothingToClaim"
+    );
   });
 
   it("Unstake an NFT", async () => {
